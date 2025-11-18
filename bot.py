@@ -429,8 +429,25 @@ Remember: He needs TRUTH, not comfort. Be his honest coach!"""
 # CHAT HANDLER
 # ==========================================
 
-@bot.message_handler(func=lambda m: not m.text.startswith('/'))
+@bot.message_handler(func=lambda m: True)
 def chat(message):
+    """Handle regular chat - this runs ONLY if no command matched"""
+    
+    # Double-check it's not a command
+    if message.text and message.text.startswith('/'):
+        bot.send_message(
+            message.chat.id, 
+            f"❌ Unknown command: {message.text}\n\n"
+            "Available commands:\n"
+            "/start - Activate bot\n"
+            "/time - Current IST time\n"
+            "/status - System status\n"
+            "/debug - Debug info\n"
+            "/test - Test reminder\n"
+            "/trigger [meal] - Manual send"
+        )
+        return
+    
     user_text = message.text
     
     try:
