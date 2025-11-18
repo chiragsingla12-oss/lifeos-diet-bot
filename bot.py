@@ -429,7 +429,7 @@ Remember: He needs TRUTH, not comfort. Be his honest coach!"""
 # CHAT HANDLER
 # ==========================================
 
-@bot.message_handler(func=lambda m: True)
+@bot.message_handler(func=lambda m: not m.text.startswith('/'))
 def chat(message):
     user_text = message.text
     
