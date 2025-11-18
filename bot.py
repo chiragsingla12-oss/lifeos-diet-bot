@@ -249,13 +249,12 @@ scheduler_thread = threading.Thread(target=scheduler, daemon=True)
 scheduler_thread.start()
 
 # ==========================================
-# BOT COMMANDS
+# BOT COMMANDS (Priority handlers - specific first!)
 # ==========================================
 
 @bot.message_handler(commands=['start'])
-def start(message):
+def cmd_start(message):
     save_chat_id(message.chat.id)
-    
     bot.send_message(
         message.chat.id,
         f"🙏 *Namaste! Your Nutrition Coach!*\n\n"
@@ -282,7 +281,7 @@ def start(message):
     )
 
 @bot.message_handler(commands=['time'])
-def show_time(message):
+def cmd_time(message):
     ist_now = get_ist_time()
     current_time = ist_now.strftime("%H:%M")
     
@@ -304,7 +303,7 @@ def show_time(message):
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 @bot.message_handler(commands=['status'])
-def status(message):
+def cmd_status(message):
     msg = f"📊 *System Status*\n\n"
     msg += f"⏰ IST: {get_ist_display()}\n"
     msg += f"👤 Chat: {active_chat_id or 'None'}\n"
@@ -316,7 +315,7 @@ def status(message):
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 @bot.message_handler(commands=['debug'])
-def debug(message):
+def cmd_debug(message):
     ist_now = get_ist_time()
     current_time = ist_now.strftime("%H:%M")
     
@@ -341,12 +340,11 @@ def debug(message):
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 @bot.message_handler(commands=['trigger'])
-def trigger(message):
+def cmd_trigger(message):
     if not active_chat_id:
         bot.send_message(message.chat.id, "⚠️ Send /start first!")
         return
     
-    # Parse meal from command
     parts = message.text.split()
     if len(parts) < 2:
         msg = "Usage: /trigger [meal]\n\nAvailable meals:\n"
@@ -363,7 +361,7 @@ def trigger(message):
         bot.send_message(message.chat.id, f"❌ Unknown meal: {meal}")
 
 @bot.message_handler(commands=['test'])
-def test(message):
+def cmd_test(message):
     if not active_chat_id:
         bot.send_message(message.chat.id, "⚠️ Send /start first!")
         return
@@ -373,7 +371,7 @@ def test(message):
     send_meal_reminder(message.chat.id, "night_craving")
 
 # ==========================================
-# SYSTEM PROMPT (same as before)
+# SYSTEM PROMPT
 # ==========================================
 SYSTEM_PROMPT = """You are an expert Indian nutritionist specializing in North Indian vegetarian diet. You are personally coaching this specific client:
 
@@ -426,36 +424,30 @@ SYSTEM_PROMPT = """You are an expert Indian nutritionist specializing in North I
 Remember: He needs TRUTH, not comfort. Be his honest coach!"""
 
 # ==========================================
-# CHAT HANDLER
+# CHAT HANDLER - MUST BE LAST!
 # ==========================================
 
-@bot.message_handler(func=lambda m: True)
-def chat(message):
-    """Handle regular chat - this runs ONLY if no command matched"""
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    """This catches ALL text messages that didn't match commands above"""
     
-    # Double-check it's not a command
-    if message.text and message.text.startswith('/'):
+    # If it starts with /, it's an unknown command
+    if message.text.startswith('/'):
         bot.send_message(
-            message.chat.id, 
-            f"❌ Unknown command: {message.text}\n\n"
+            message.chat.id,
+            "❌ Unknown command!\n\n"
             "Available commands:\n"
-            "/start - Activate bot\n"
-            "/time - Current IST time\n"
-            "/status - System status\n"
-            "/debug - Debug info\n"
-            "/test - Test reminder\n"
-            "/trigger [meal] - Manual send"
+            "/start /time /status /debug /test /trigger"
         )
         return
     
-    user_text = message.text
-    
+    # Regular chat - send to AI
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text}
+                {"role": "user", "content": message.text}
             ],
             max_tokens=500,
             temperature=0.7
