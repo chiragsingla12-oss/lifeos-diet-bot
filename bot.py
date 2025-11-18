@@ -5,430 +5,278 @@ import telebot
 import datetime
 import pytz
 from openai import OpenAI
+from flask import Flask
+from threading import Thread
 
+# ==========================================
+# CONFIGURATION
+# ==========================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==========================================
-# 🇮🇳 INDIAN TIMEZONE SETUP
-# ==========================================
+# IST Timezone
 IST = pytz.timezone('Asia/Kolkata')
 
+# Persistent storage
+CHAT_ID_FILE = "/tmp/chat_id.txt"
+active_chat_id = None
+
+# Scheduler status tracking
+scheduler_status = {
+    "last_check": None,
+    "last_sent": None,
+    "is_running": False,
+    "error_count": 0
+}
+
+# ==========================================
+# MEAL SCHEDULE
+# ==========================================
+meal_schedule = {
+    "morning_routine": "08:00",
+    "post_workout": "08:30",
+    "breakfast": "08:45",
+    "midday_hydration": "11:00",
+    "lunch": "13:00",
+    "snack": "16:30",
+    "dinner": "18:30",
+    "night_craving": "21:00"
+}
+
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 def get_ist_time():
-    """Get current time in IST"""
     return datetime.datetime.now(IST)
 
 def get_ist_time_str():
-    """Get current IST time as HH:MM string"""
     return get_ist_time().strftime("%H:%M")
 
-def get_ist_display_time():
-    """Get current IST time for display (12-hour format)"""
-    return get_ist_time().strftime("%I:%M %p IST")
-
-# ==========================================
-# PERSISTENT CHAT ID STORAGE
-# ==========================================
-CHAT_ID_FILE = "/tmp/chat_id.txt"
+def get_ist_display():
+    return get_ist_time().strftime("%I:%M:%S %p IST")
 
 def save_chat_id(chat_id):
-    with open(CHAT_ID_FILE, "w") as f:
-        f.write(str(chat_id))
-    print(f"✅ Saved chat_id: {chat_id} at {get_ist_display_time()}")
+    global active_chat_id
+    active_chat_id = chat_id
+    try:
+        with open(CHAT_ID_FILE, "w") as f:
+            f.write(str(chat_id))
+        print(f"✅ Saved chat_id: {chat_id}")
+    except Exception as e:
+        print(f"❌ Error saving chat_id: {e}")
 
 def load_chat_id():
+    global active_chat_id
     try:
         if os.path.exists(CHAT_ID_FILE):
             with open(CHAT_ID_FILE, "r") as f:
                 chat_id = int(f.read().strip())
+                active_chat_id = chat_id
                 print(f"✅ Loaded chat_id: {chat_id}")
                 return chat_id
     except Exception as e:
         print(f"⚠️ Error loading chat_id: {e}")
     return None
 
-# Load chat_id on startup
-active_chat_id = load_chat_id()
+# Load on startup
+load_chat_id()
 
 # ==========================================
-# 🍽️ DAILY MEAL SCHEDULE (IST)
-# ==========================================
-meal_schedule = {
-    "morning_routine": "08:00",      # 8:00 AM IST
-    "post_workout": "08:30",         # 8:30 AM IST
-    "breakfast": "08:45",            # 8:45 AM IST
-    "midday_hydration": "11:00",     # 11:00 AM IST
-    "lunch": "13:00",                # 1:00 PM IST
-    "snack": "16:30",                # 4:30 PM IST
-    "dinner": "18:30",               # 6:30 PM IST
-    "night_craving": "21:00"         # 9:00 PM IST
-}
-
-# ==========================================
-# FOOD OPTIONS (same as before)
+# FOOD OPTIONS (abbreviated for space)
 # ==========================================
 def get_food_options(meal):
-    
-    if meal == "morning_routine":
-        hydration = [
-            "💧 **STEP 1 - Hydration (Mandatory!):**",
-            "• 300ml warm water",
-            "• Warm lemon water",
-            "• Warm ajwain + jeera water",
-            "• Warm water + 1 pinch cinnamon"
+    options_map = {
+        "morning_routine": [
+            "💧 Warm water/lemon water/ajwain-jeera water",
+            "🏋️ Pre-workout: Banana/almonds (if needed)"
+        ],
+        "post_workout": [
+            "💪 Fruit/almonds/coconut/roasted chana"
+        ],
+        "breakfast": [
+            "🥘 Moong dal chilla/Besan chilla/Poha/Upma/Idli",
+            "💪 Paneer bhurji (small)/Greek yogurt",
+            "⚡ Toast + peanut butter/Banana + almonds"
+        ],
+        "midday_hydration": [
+            "💧 Water/Coconut water/Lemonade (no sugar)"
+        ],
+        "lunch": [
+            "📋 BASE: 2 rotis / 1 roti + ½ rice / 1 bowl rice",
+            "🥘 SABZI: Lauki/Tinda/Bhindi/Beans/Mix veg",
+            "⚠️ ONLY 1 SMALL BOWL SABZI!",
+            "💪 PROTEIN: Dal/Rajma/Chole/Curd (MANDATORY)",
+            "🥗 SALAD: Cucumber/carrot/sprouts (FIRST!)"
+        ],
+        "snack": [
+            "🥜 Roasted chana/Makhana/Peanut chaat",
+            "🍎 Apple/Pomegranate/Banana",
+            "💪 Paneer cubes/Sprouts",
+            "⚠️ IF CRAVING NAMKEEN: Mix roasted chana + murmura + peanuts"
+        ],
+        "dinner": [
+            "🌙 LIGHT: Moong dal khichdi/Daliya/1 roti + dal",
+            "💪 Paneer bhurji/Tofu/Moong dal + veg",
+            "✨ VERY LIGHT: Soup/Khichdi + curd"
+        ],
+        "night_craving": [
+            "🍵 Warm drinks: Ajwain-jeera-haldi/Lemon/Cinnamon water",
+            "🥜 Makhana/Roasted chana/6-8 almonds/Khakhra",
+            "🍯 Sweet: Small jaggery/Warm milk + cinnamon",
+            "🚫 AVOID: Namkeen/Biscuits/Apple/Fried snacks"
         ]
-        
-        pre_workout = [
-            "\n🏋️ **STEP 2 - Pre-Workout Fuel (Only if needed):**",
-            "• 1 banana",
-            "• 6-8 almonds",
-            "• 1 small apple",
-            "• 1 tsp peanut butter",
-            "• ⏭️ Skip if not feeling low energy"
-        ]
-        
-        return hydration + pre_workout
-    
-    if meal == "post_workout":
-        return [
-            "💪 **Post-Workout Mini Meal**",
-            "(Keeps energy stable till breakfast)\n",
-            "• 1 fruit (apple/banana/orange)",
-            "• 8-10 almonds",
-            "• Coconut slice",
-            "• ½ bowl roasted chana"
-        ]
-    
-    if meal == "breakfast":
-        veg_indian = [
-            "🥘 **VEG INDIAN OPTIONS:**",
-            "• Moong dal chilla (2) + green chutney",
-            "• Besan chilla (2) + curd",
-            "• Poha with veggies + peanuts (avoid potato)",
-            "• Upma with vegetables",
-            "• Vegetable daliya",
-            "• 2 idli + sambar + chutney",
-            "• Stuffed moong dal cheela (paneer ok)"
-        ]
-        
-        protein_boost = [
-            "\n💪 **PROTEIN-BOOST OPTIONS:**",
-            "• Paneer bhurji (small portion)",
-            "• Greek yogurt + fruit + nuts (if available)"
-        ]
-        
-        quick_options = [
-            "\n⚡ **QUICK OPTIONS (Busy days):**",
-            "• 2 multigrain toast + peanut butter",
-            "• Banana + almond combo",
-            "• Overnight oats"
-        ]
-        
-        return veg_indian + protein_boost + quick_options
-    
-    if meal == "midday_hydration":
-        return [
-            "💧 **HYDRATION:**",
-            "• 1 glass water",
-            "• 🥥 Coconut water (BEST choice!)",
-            "• Lemonade without sugar",
-            "\n🍪 **Craving Check:**",
-            "If feeling hungry, have 5-6 almonds or wait for lunch!"
-        ]
-    
-    if meal == "lunch":
-        base_options = [
-            "📋 **BASE (Pick ONE):**",
-            "• 2 multigrain rotis",
-            "• 1 roti + ½ cup rice",
-            "• 1 bowl rice (fist size)",
-            "• 2 bajra/jowar rotis"
-        ]
-        
-        sabzi_options = [
-            "\n🥘 **SABZI (Pick ONE - avoid potato-only!):**",
-            "• Lauki (bottle gourd)",
-            "• Tinda (apple gourd)",
-            "• Bhindi (okra)",
-            "• Beans-carrot mix",
-            "• Aloo-gobi (MORE gobi, LESS aloo)",
-            "• Mix veg (no potato dominance)",
-            "• Palak (spinach)",
-            "• Mushroom-paneer 50/50 mix",
-            "\n⚠️ **CRITICAL: Only 1 SMALL bowl sabzi, not 1.5 bowls!**"
-        ]
-        
-        protein_options = [
-            "\n💪 **PROTEIN (Pick ONE - MANDATORY!):**",
-            "• Dal (moong/masoor/toor/arhar)",
-            "• Rajma (kidney beans)",
-            "• Chole (chickpeas)",
-            "• Kala chana (black gram)",
-            "• Curd (1 bowl)"
-        ]
-        
-        salad_options = [
-            "\n🥗 **SALAD (MANDATORY!):**",
-            "• Cucumber + carrot + lemon",
-            "• Sprouts salad",
-            "• Onion + cucumber + chaat masala",
-            "\n💡 **EAT SALAD FIRST!**"
-        ]
-        
-        return base_options + sabzi_options + protein_options + salad_options
-    
-    if meal == "snack":
-        healthy_crunch = [
-            "🥜 **HEALTHY CRUNCH:**",
-            "• Roasted chana",
-            "• Makhana (foxnuts)",
-            "• Peanut chaat",
-            "• 1 khakhra",
-            "• Coconut slices",
-            "• Popcorn (homemade, no butter)"
-        ]
-        
-        fruit_options = [
-            "\n🍎 **FRUIT OPTIONS:**",
-            "• Apple",
-            "• Pomegranate",
-            "• Banana",
-            "• Papaya"
-        ]
-        
-        protein_options = [
-            "\n💪 **PROTEIN OPTIONS:**",
-            "• Paneer cubes (small bowl)",
-            "• Sprouts with lemon",
-            "• Moong chaat"
-        ]
-        
-        craving_fix = [
-            "\n⚠️ **IF CRAVING NAMKEEN:**",
-            "DON'T reach for that namkeen dabba!",
-            "Make this instead:",
-            "• Mix: roasted chana + murmura + peanuts + onion + lemon",
-            "(Healthier, filling, won't sabotage your progress!)"
-        ]
-        
-        return healthy_crunch + fruit_options + protein_options + craving_fix
-    
-    if meal == "dinner":
-        light_options = [
-            "🌙 **LIGHT INDIAN (Best for fat loss):**",
-            "• Moong dal khichdi + curd",
-            "• Daliya + vegetables",
-            "• 1 roti + non-potato sabzi + dal",
-            "• Palak-paneer 50/50",
-            "• Lauki + dal",
-            "• Mixed veg + 1 roti"
-        ]
-        
-        protein_options = [
-            "\n💪 **HIGH-PROTEIN:**",
-            "• Paneer bhurji + salad",
-            "• Tofu stir fry (if available)",
-            "• Moong dal + mixed veg"
-        ]
-        
-        very_light = [
-            "\n✨ **VERY LIGHT (if not hungry):**",
-            "• Vegetable soup",
-            "• Paneer + salad only",
-            "• Khichdi + curd"
-        ]
-        
-        rules = [
-            "\n⚠️ **GOLDEN RULES:**",
-            "• Keep it LIGHT - no heavy meals",
-            "• Less ghee/oil",
-            "• Walk 5-10 min after eating"
-        ]
-        
-        return light_options + protein_options + very_light + rules
-    
-    if meal == "night_craving":
-        warm_drinks = [
-            "🍵 **WARM DRINKS (BEST choice!):**",
-            "• Ajwain-jeera-haldi warm water",
-            "• Lemon warm water",
-            "• Cinnamon warm water"
-        ]
-        
-        healthy_munch = [
-            "\n🥜 **HEALTHY MUNCH (If really hungry):**",
-            "• 1 handful makhana",
-            "• Roasted chana (small bowl)",
-            "• 6-8 almonds",
-            "• 1 khakhra"
-        ]
-        
-        sweet_craving = [
-            "\n🍯 **SWEET CRAVING:**",
-            "• Small piece jaggery",
-            "• ½ cup warm milk + cinnamon (no sugar)"
-        ]
-        
-        warning = [
-            "\n🚫 **ABSOLUTELY AVOID:**",
-            "• Namkeen (your biggest enemy!)",
-            "• Biscuits",
-            "• Apple (sugar spike at night)",
-            "• Any fried snacks"
-        ]
-        
-        motivation = [
-            "\n✅ **REMEMBER:**",
-            "This is your WEAKEST time!",
-            "Choose wisely = Wake up lighter tomorrow!",
-            "You've done great all day - don't sabotage it now!"
-        ]
-        
-        return warm_drinks + healthy_munch + sweet_craving + warning + motivation
+    }
+    return options_map.get(meal, ["Options not found"])
 
 # ==========================================
-# 📨 SEND REMINDER FUNCTION
+# SEND REMINDER
 # ==========================================
 def send_meal_reminder(chat_id, meal):
+    global scheduler_status
     try:
         options = get_food_options(meal)
-        current_time = get_ist_display_time()
+        current_time = get_ist_display()
         
-        if meal == "morning_routine":
-            message = f"🌅 *GOOD MORNING!*\n⏰ Time: {current_time}\n\n"
-            message += "Your morning routine has 2 steps:\n"
-        elif meal == "post_workout":
-            message = f"💪 *Post-Workout Recovery*\n⏰ {current_time}\n\n"
-            message += "Great job on your workout! Quick refuel:\n"
-        elif meal == "breakfast":
-            message = f"🍳 *Breakfast Time!*\n⏰ {current_time}\n\n"
-            message += "High protein + moderate carbs:\n"
-        elif meal == "midday_hydration":
-            message = f"💧 *Midday Check-in!*\n⏰ {current_time}\n\n"
-            message += "Hydrate + Control cravings:\n"
-        elif meal == "lunch":
-            message = f"🍽️ *Lunch Time!*\n⏰ {current_time}\n\n"
-            message += "⚠️ **GOLDEN RULES:**\n"
-            message += "• ½ glass warm water 2 min BEFORE\n"
-            message += "• Eat salad FIRST\n"
-            message += "• SMALL bowl sabzi (not 1.5!)\n"
-            message += "• Only 1-2 sips water DURING\n\n"
-        elif meal == "snack":
-            message = f"☕ *Evening Snack Time!*\n⏰ {current_time}\n\n"
-            message += "⚠️ **HIGH RISK - Namkeen time!**\n"
-        elif meal == "dinner":
-            message = f"🌆 *Dinner Time!*\n⏰ {current_time}\n\n"
-            message += "Keep it LIGHT:\n"
-        elif meal == "night_craving":
-            message = f"🌙 *Night Craving Alert!*\n⏰ {current_time}\n\n"
-            message += "**PREPARE - don't reach for namkeen!**\n\n"
+        titles = {
+            "morning_routine": "🌅 GOOD MORNING!",
+            "post_workout": "💪 Post-Workout Recovery",
+            "breakfast": "🍳 Breakfast Time!",
+            "midday_hydration": "💧 Midday Check-in!",
+            "lunch": "🍽️ Lunch Time!",
+            "snack": "☕ Evening Snack! ⚠️ NAMKEEN TIME",
+            "dinner": "🌆 Dinner Time!",
+            "night_craving": "🌙 Night Craving Alert! ⚠️"
+        }
+        
+        message = f"*{titles.get(meal, meal)}*\n⏰ {current_time}\n\n"
         
         for item in options:
             message += f"{item}\n"
         
-        if meal == "lunch" or meal == "dinner":
-            message += "\n💡 *Walk 5-10 mins after eating!*"
+        if meal in ["lunch", "dinner"]:
+            message += "\n💡 Walk 5-10 mins after eating!"
         elif meal == "snack":
-            message += "\n🎯 *Stay strong - YOUR weak time!*"
+            message += "\n🎯 Stay strong - YOUR weak time!"
+        elif meal == "night_craving":
+            message += "\n✅ Choose wisely = Wake lighter tomorrow!"
         
         bot.send_message(chat_id, message, parse_mode="Markdown")
-        print(f"✅ [{get_ist_display_time()}] Sent {meal} reminder to {chat_id}")
+        scheduler_status["last_sent"] = f"{meal} at {current_time}"
+        print(f"✅ [{current_time}] Sent {meal} to {chat_id}")
+        return True
         
     except Exception as e:
-        print(f"❌ [{get_ist_display_time()}] Error sending {meal}: {e}")
+        scheduler_status["error_count"] += 1
+        print(f"❌ [{get_ist_display()}] Error sending {meal}: {e}")
+        return False
 
 # ==========================================
-# ⏰ SCHEDULER (IST OPTIMIZED)
+# SCHEDULER (SUPER AGGRESSIVE)
 # ==========================================
 def scheduler():
-    global active_chat_id
-    sent_today = {}
-    last_minute_logged = None
+    global scheduler_status
+    sent_today = set()
     
-    print(f"🔄 Scheduler started at {get_ist_display_time()}")
+    scheduler_status["is_running"] = True
+    print(f"🔄 Scheduler started at {get_ist_display()}")
     
     while True:
         try:
-            # Get current IST time
             ist_now = get_ist_time()
             current_time = ist_now.strftime("%H:%M")
             current_date = ist_now.strftime("%Y-%m-%d")
-            current_minute = ist_now.strftime("%H:%M")
             
-            # Log once per minute (not every 30 seconds)
-            if current_minute != last_minute_logged:
-                print(f"🇮🇳 [{get_ist_display_time()}] Active Chat: {active_chat_id or 'None - send /start'}")
-                last_minute_logged = current_minute
+            # Update status
+            scheduler_status["last_check"] = get_ist_display()
+            
+            # Log every minute
+            if ist_now.second == 0:
+                print(f"\n{'='*60}")
+                print(f"🇮🇳 [{get_ist_display()}]")
+                print(f"📱 Active Chat: {active_chat_id or 'NONE - Need /start'}")
+                print(f"📅 Date: {current_date}")
+                print(f"⏰ Current Time: {current_time}")
                 
-                # Show upcoming reminder
-                for meal, time_str in meal_schedule.items():
-                    if current_time < time_str:
-                        time_until = datetime.datetime.strptime(time_str, "%H:%M") - datetime.datetime.strptime(current_time, "%H:%M")
-                        mins_until = time_until.seconds // 60
-                        if mins_until <= 5:
-                            print(f"   ⏰ Next: {meal} in {mins_until} minutes")
+                # Show next reminder
+                for meal, time_str in sorted(meal_schedule.items(), key=lambda x: x[1]):
+                    if time_str > current_time:
+                        try:
+                            time_obj = datetime.datetime.strptime(time_str, "%H:%M")
+                            current_obj = datetime.datetime.strptime(current_time, "%H:%M")
+                            diff = (time_obj - current_obj).seconds // 60
+                            print(f"⏰ Next: {meal} in {diff} minutes ({time_str})")
+                        except:
+                            pass
                         break
+                
+                print(f"📊 Sent today: {len(sent_today)}")
+                print(f"{'='*60}\n")
             
-            # Reset at midnight IST
-            if current_time == "00:00" and "reset" not in sent_today.get(current_date, {}):
-                sent_today = {current_date: {"reset": True}}
-                print(f"🔄 [{get_ist_display_time()}] Daily tracker reset")
+            # Reset at midnight
+            if current_time == "00:00":
+                sent_today.clear()
+                print(f"🔄 [{get_ist_display()}] Daily tracker reset")
             
-            # Check and send reminders
+            # Check reminders
             if active_chat_id:
                 for meal, time_str in meal_schedule.items():
                     meal_key = f"{current_date}_{meal}"
                     
+                    # Match within the same minute (more forgiving)
                     if current_time == time_str and meal_key not in sent_today:
-                        print(f"🔔 [{get_ist_display_time()}] TRIGGERING: {meal}")
-                        send_meal_reminder(active_chat_id, meal)
-                        sent_today[meal_key] = ist_now
+                        print(f"\n🔔🔔🔔 TRIGGER: {meal} at {current_time} 🔔🔔🔔")
+                        if send_meal_reminder(active_chat_id, meal):
+                            sent_today.add(meal_key)
+                            print(f"✅ Marked {meal_key} as sent")
                         time.sleep(2)
+            else:
+                if ist_now.second == 0:
+                    print(f"⚠️ No chat_id - user must send /start to bot")
             
         except Exception as e:
-            print(f"❌ [{get_ist_display_time()}] Scheduler error: {e}")
+            scheduler_status["error_count"] += 1
+            print(f"❌ Scheduler error: {e}")
+            import traceback
+            traceback.print_exc()
         
-        time.sleep(30)
+        time.sleep(10)  # Check every 10 seconds for more reliability
 
 # Start scheduler
-threading.Thread(target=scheduler, daemon=True).start()
+scheduler_thread = threading.Thread(target=scheduler, daemon=True)
+scheduler_thread.start()
 
 # ==========================================
-# 🤖 BOT COMMANDS
+# BOT COMMANDS
 # ==========================================
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    global active_chat_id
-    active_chat_id = message.chat.id
-    save_chat_id(active_chat_id)
+    save_chat_id(message.chat.id)
     
     bot.send_message(
         message.chat.id,
         f"🙏 *Namaste! Your Nutrition Coach!*\n\n"
-        f"🇮🇳 Bot Time: {get_ist_display_time()}\n"
-        f"✅ Chat Activated!\n\n"
-        "📊 *Your Profile:*\n"
-        "• 84 kg → 74 kg goal\n"
-        "• Plateau: 1.5 years\n"
-        "• Focus: Diabetes prevention\n\n"
-        "🔔 *IST Reminder Schedule:*\n"
-        "• 8:00 AM - Morning routine\n"
-        "• 8:30 AM - Post-workout\n"
-        "• 8:45 AM - Breakfast\n"
-        "• 11:00 AM - Midday check\n"
-        "• 1:00 PM - Lunch\n"
-        "• 4:30 PM - Evening snack ⚠️\n"
-        "• 6:30 PM - Dinner\n"
-        "• 9:00 PM - Night craving ⚠️\n\n"
+        f"🇮🇳 Activated: {get_ist_display()}\n"
+        f"👤 Chat ID: {message.chat.id}\n\n"
+        "✅ *Profile:* 84→74kg, Plateau 1.5yr\n\n"
+        "🔔 *IST Schedule:*\n"
+        "• 08:00 - Morning routine\n"
+        "• 08:30 - Post-workout\n"
+        "• 08:45 - Breakfast\n"
+        "• 11:00 - Midday check\n"
+        "• 13:00 - Lunch\n"
+        "• 16:30 - Snack ⚠️\n"
+        "• 18:30 - Dinner\n"
+        "• 21:00 - Night craving ⚠️\n\n"
         "💬 *Commands:*\n"
-        "/time - Check IST time\n"
-        "/status - Reminder status\n"
-        "/test - Test reminder\n"
-        "/plan - Full day plan\n\n"
+        "/time - Current IST\n"
+        "/status - System status\n"
+        "/debug - Full debug info\n"
+        "/trigger [meal] - Manual send\n"
+        "/test - Test night reminder\n\n"
         "Let's break that plateau! 💪",
         parse_mode="Markdown"
     )
@@ -436,72 +284,93 @@ def start(message):
 @bot.message_handler(commands=['time'])
 def show_time(message):
     ist_now = get_ist_time()
-    
-    msg = f"🇮🇳 *Current Time Check*\n\n"
-    msg += f"⏰ IST Time: {get_ist_display_time()}\n"
-    msg += f"📅 Date: {ist_now.strftime('%d %B %Y')}\n"
-    msg += f"📆 Day: {ist_now.strftime('%A')}\n\n"
-    
-    msg += "*Next Reminders Today:*\n"
     current_time = ist_now.strftime("%H:%M")
     
+    msg = f"🇮🇳 *Current Time*\n\n"
+    msg += f"⏰ {get_ist_display()}\n"
+    msg += f"📅 {ist_now.strftime('%d %B %Y, %A')}\n\n"
+    msg += "*Upcoming Today:*\n"
+    
+    found_upcoming = False
     for meal, time_str in sorted(meal_schedule.items(), key=lambda x: x[1]):
         if time_str > current_time:
-            msg += f"• {time_str} - {meal.replace('_', ' ').title()}\n"
+            time_obj = datetime.datetime.strptime(time_str, "%H:%M")
+            msg += f"• {time_obj.strftime('%I:%M %p')} - {meal.replace('_', ' ').title()}\n"
+            found_upcoming = True
+    
+    if not found_upcoming:
+        msg += "• No more reminders today"
     
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 
 @bot.message_handler(commands=['status'])
 def status(message):
-    status_msg = f"📊 *Bot Status*\n\n"
-    status_msg += f"🇮🇳 IST Time: {get_ist_display_time()}\n"
-    status_msg += f"👤 Chat ID: {message.chat.id}\n"
-    status_msg += f"✅ Reminders: {'✓ Active' if active_chat_id else '✗ Inactive'}\n\n"
+    msg = f"📊 *System Status*\n\n"
+    msg += f"⏰ IST: {get_ist_display()}\n"
+    msg += f"👤 Chat: {active_chat_id or 'None'}\n"
+    msg += f"🔄 Scheduler: {'✅ Running' if scheduler_status['is_running'] else '❌ Stopped'}\n"
+    msg += f"📡 Last Check: {scheduler_status['last_check'] or 'Never'}\n"
+    msg += f"📨 Last Sent: {scheduler_status['last_sent'] or 'None'}\n"
+    msg += f"❌ Errors: {scheduler_status['error_count']}\n"
     
-    if active_chat_id:
-        status_msg += "*All Scheduled Reminders (IST):*\n"
-        for meal, time_str in sorted(meal_schedule.items(), key=lambda x: x[1]):
-            # Convert to 12-hour format
-            time_obj = datetime.datetime.strptime(time_str, "%H:%M")
-            time_12hr = time_obj.strftime("%I:%M %p")
-            status_msg += f"• {time_12hr} - {meal.replace('_', ' ').title()}\n"
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+
+@bot.message_handler(commands=['debug'])
+def debug(message):
+    ist_now = get_ist_time()
+    current_time = ist_now.strftime("%H:%M")
+    
+    msg = f"🔍 *Debug Information*\n\n"
+    msg += f"⏰ Current IST: {get_ist_display()}\n"
+    msg += f"🕐 Time String: {current_time}\n"
+    msg += f"👤 Your Chat ID: {message.chat.id}\n"
+    msg += f"💾 Stored Chat ID: {active_chat_id}\n"
+    msg += f"✅ Match: {'YES' if message.chat.id == active_chat_id else 'NO'}\n\n"
+    
+    msg += f"🔄 *Scheduler Status:*\n"
+    msg += f"Running: {scheduler_status['is_running']}\n"
+    msg += f"Last Check: {scheduler_status['last_check']}\n"
+    msg += f"Last Sent: {scheduler_status['last_sent']}\n"
+    msg += f"Errors: {scheduler_status['error_count']}\n\n"
+    
+    msg += f"📅 *Schedule Check:*\n"
+    for meal, time_str in meal_schedule.items():
+        match = "✅ NOW!" if current_time == time_str else "⏳"
+        msg += f"{match} {time_str} - {meal}\n"
+    
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+
+@bot.message_handler(commands=['trigger'])
+def trigger(message):
+    if not active_chat_id:
+        bot.send_message(message.chat.id, "⚠️ Send /start first!")
+        return
+    
+    # Parse meal from command
+    parts = message.text.split()
+    if len(parts) < 2:
+        msg = "Usage: /trigger [meal]\n\nAvailable meals:\n"
+        for meal in meal_schedule.keys():
+            msg += f"• {meal}\n"
+        bot.send_message(message.chat.id, msg)
+        return
+    
+    meal = parts[1]
+    if meal in meal_schedule:
+        bot.send_message(message.chat.id, f"🔧 Manually triggering: {meal}")
+        send_meal_reminder(active_chat_id, meal)
     else:
-        status_msg += "⚠️ Send /start to activate reminders"
-    
-    bot.send_message(message.chat.id, status_msg, parse_mode="Markdown")
+        bot.send_message(message.chat.id, f"❌ Unknown meal: {meal}")
 
 @bot.message_handler(commands=['test'])
 def test(message):
     if not active_chat_id:
-        bot.send_message(message.chat.id, "⚠️ Send /start first to activate bot!")
+        bot.send_message(message.chat.id, "⚠️ Send /start first!")
         return
     
-    bot.send_message(message.chat.id, 
-                    f"🧪 *Testing Reminder System*\n\n"
-                    f"Current IST: {get_ist_display_time()}\n\n"
-                    f"Sending night craving reminder as test...",
-                    parse_mode="Markdown")
+    bot.send_message(message.chat.id, "🧪 Sending test reminder...")
     time.sleep(1)
     send_meal_reminder(message.chat.id, "night_craving")
-
-@bot.message_handler(commands=['plan'])
-def show_plan(message):
-    plan = f"""📋 *YOUR DAILY MEAL PLAN*
-🇮🇳 Current: {get_ist_display_time()}
-
-🌅 **8:00 AM** - Morning Routine
-💪 **8:30 AM** - Post-Workout  
-🍳 **8:45 AM** - Breakfast
-💧 **11:00 AM** - Midday Check
-🍽️ **1:00 PM** - Lunch
-☕ **4:30 PM** - Snack ⚠️ HIGH RISK!
-🌆 **6:30 PM** - Dinner (Light)
-🌙 **9:00 PM** - Night Control ⚠️
-😴 **11:00 PM** - Sleep
-
-*All times in IST (Indian Standard Time)*
-"""
-    bot.send_message(message.chat.id, plan, parse_mode="Markdown")
 
 # ==========================================
 # SYSTEM PROMPT (same as before)
@@ -559,34 +428,17 @@ Remember: He needs TRUTH, not comfort. Be his honest coach!"""
 # ==========================================
 # CHAT HANDLER
 # ==========================================
+
 @bot.message_handler(func=lambda m: True)
 def chat(message):
     user_text = message.text
-    
-    # Dynamic context
-    if any(word in user_text.lower() for word in ['craving', 'namkeen', 'junk', 'pizza', 'burger']):
-        priority_context = "\n\n🚨 CRAVING - Give immediate alternative + remind this is plateau cause."
-    elif any(word in user_text.lower() for word in ['plateau', 'not losing', 'stuck']):
-        priority_context = "\n\n🎯 PLATEAU - Address all 5 root causes with numbers."
-    elif any(word in user_text.lower() for word in ['aloo', 'potato', 'paneer']):
-        priority_context = "\n\n🥘 Give EXACT portion + what to combine."
-    elif 'wife made' in user_text.lower() or 'family cooked' in user_text.lower():
-        priority_context = "\n\n👨‍👩‍👧 FAMILY MEAL - Give portion strategy, can't change food."
-    else:
-        priority_context = ""
     
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT + priority_context
-                },
-                {
-                    "role": "user",
-                    "content": user_text
-                }
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text}
             ],
             max_tokens=500,
             temperature=0.7
@@ -594,100 +446,95 @@ def chat(message):
         
         reply = completion.choices[0].message.content
         bot.send_message(message.chat.id, reply, parse_mode="Markdown")
-    
     except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ Error: {str(e)}\n\nTry again!")
+        bot.send_message(message.chat.id, f"⚠️ Error: {e}")
 
 # ==========================================
-# KEEP-ALIVE SERVER (For Replit)
+# KEEP-ALIVE WEB SERVER
 # ==========================================
-from flask import Flask
-from threading import Thread
-
 app = Flask('')
 
 @app.route('/')
 def home():
-    return f"""
+    ist_now = get_ist_time()
+    current_time = ist_now.strftime("%H:%M")
+    
+    html = f"""
     <html>
-    <head><title>Nutrition Bot</title></head>
-    <body style="font-family: Arial; padding: 20px;">
-        <h1>🇮🇳 Nutrition Bot is Running!</h1>
-        <h2>Current Status:</h2>
-        <p><strong>IST Time:</strong> {get_ist_display_time()}</p>
-        <p><strong>Active Chat ID:</strong> {active_chat_id or 'None - User needs to send /start'}</p>
-        <p><strong>Reminders:</strong> {'✅ Active' if active_chat_id else '❌ Inactive'}</p>
-        <h3>Scheduled Reminders (IST):</h3>
-        <ul>
-        {''.join([f'<li>{time} - {meal.replace("_", " ").title()}</li>' for meal, time in sorted(meal_schedule.items(), key=lambda x: x[1])])}
-        </ul>
-        <p><em>Refresh this page to see updated time</em></p>
+    <head>
+        <title>Nutrition Bot</title>
+        <meta http-equiv="refresh" content="30">
+    </head>
+    <body style="font-family: Arial; padding: 20px; background: #f0f0f0;">
+        <h1>🇮🇳 Nutrition Bot Status</h1>
+        <div style="background: white; padding: 20px; border-radius: 10px;">
+            <h2>⏰ Current IST: {get_ist_display()}</h2>
+            <p><strong>Active Chat ID:</strong> {active_chat_id or '❌ None - Need /start'}</p>
+            <p><strong>Scheduler:</strong> {'✅ Running' if scheduler_status['is_running'] else '❌ Stopped'}</p>
+            <p><strong>Last Check:</strong> {scheduler_status['last_check'] or 'Never'}</p>
+            <p><strong>Last Sent:</strong> {scheduler_status['last_sent'] or 'None'}</p>
+            <p><strong>Errors:</strong> {scheduler_status['error_count']}</p>
+            
+            <h3>📅 Schedule (IST):</h3>
+            <ul>
+    """
+    
+    for meal, time_str in sorted(meal_schedule.items(), key=lambda x: x[1]):
+        status_icon = "🔔 NOW" if current_time == time_str else ("✅ DONE" if time_str < current_time else "⏳ UPCOMING")
+        html += f"<li>{status_icon} {time_str} - {meal.replace('_', ' ').title()}</li>"
+    
+    html += """
+            </ul>
+            <p><em>Auto-refreshes every 30 seconds</em></p>
+        </div>
     </body>
     </html>
     """
+    return html
 
-def run():
+@app.route('/ping')
+def ping():
+    return {
+        "status": "alive",
+        "ist_time": get_ist_display(),
+        "chat_id": active_chat_id,
+        "scheduler_running": scheduler_status["is_running"]
+    }
+
+def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-keep_alive()
+flask_thread = Thread(target=run_flask)
+flask_thread.start()
 
 # ==========================================
-# 🚀 START BOT
+# START BOT
 # ==========================================
-print("=" * 60)
-print("🇮🇳 INDIAN NUTRITION BOT STARTING")
-print("=" * 60)
-print(f"⏰ Current IST Time: {get_ist_display_time()}")
-print(f"📅 Scheduled Reminders: {len(meal_schedule)}")
-print("\n🔔 Reminder Schedule (IST):")
+print("\n" + "="*60)
+print("🇮🇳 NUTRITION BOT STARTING")
+print("="*60)
+print(f"⏰ IST Time: {get_ist_display()}")
+print(f"👤 Active Chat: {active_chat_id or 'None - need /start'}")
+print(f"📅 Reminders: {len(meal_schedule)}")
+print("\n🔔 Schedule:")
 for meal, time in sorted(meal_schedule.items(), key=lambda x: x[1]):
-    time_obj = datetime.datetime.strptime(time, "%H:%M")
-    print(f"   {time_obj.strftime('%I:%M %p')} - {meal.replace('_', ' ').title()}")
-print(f"\n💾 Chat ID Storage: {CHAT_ID_FILE}")
-print(f"🌐 Timezone: Asia/Kolkata (IST)")
-print(f"👤 Active Chat: {active_chat_id or 'None - waiting for /start'}")
-print("=" * 60)
-print("✅ Bot is now running and listening...")
-print("=" * 60)
+    print(f"   {time} - {meal}")
+print("="*60)
+print("✅ Bot running - Check console for minute-by-minute logs")
+print(f"🌐 Web dashboard: http://0.0.0.0:8080")
+print("="*60 + "\n")
 
 bot.infinity_polling()
 ```
 
 ---
 
-## **🎯 KEY IMPROVEMENTS FOR IST:**
+## **🚀 DEPLOYMENT STEPS:**
 
-1. **✅ Dedicated IST Functions:**
-   - `get_ist_time()` - Always returns IST datetime
-   - `get_ist_time_str()` - Returns HH:MM in IST
-   - `get_ist_display_time()` - Returns "02:30 PM IST" format
+### **1. Add to Replit**
+Replace entire code with above.
 
-2. **✅ IST Timestamp in Every Message:**
-   - Every reminder shows current IST time
-   - Example: "⏰ Time: 09:00 PM IST"
-
-3. **✅ New `/time` Command:**
-   - Shows current IST time
-   - Lists upcoming reminders for today
-   - Perfect for verification!
-
-4. **✅ Better Logging:**
-   - Console shows IST time with 🇮🇳 emoji
-   - Shows countdown to next reminder
-   - Easy to verify timezone is correct
-
-5. **✅ Web Dashboard:**
-   - Visit your Replit URL
-   - See current IST time
-   - Check if reminders are active
-
----
-
-## **📦 REQUIREMENTS.TXT:**
+### **2. Update requirements.txt:**
 ```
 telebot
 pytz
@@ -695,61 +542,20 @@ openai
 flask
 ```
 
----
+### **3. Set Up External Ping (CRITICAL!):**
 
-## **🧪 HOW TO VERIFY IT'S WORKING:**
+Go to **[UptimeRobot.com](https://uptimerobot.com)** (free):
+1. Create account
+2. Add new monitor
+3. Monitor Type: HTTP(s)
+4. URL: `https://YOUR-REPLIT-URL.repl.co/ping`
+5. Interval: Every 5 minutes
+6. Save
 
-### **Step 1: Deploy & Start**
-1. Replace code in Replit
-2. Send `/start` to your bot
+This keeps Replit awake 24/7!
 
-### **Step 2: Check IST Time**
-Send this command to bot:
+### **4. Send Commands to Bot:**
 ```
+/start
+/debug
 /time
-```
-You should see:
-```
-🇮🇳 Current Time Check
-
-⏰ IST Time: 09:15 PM IST
-📅 Date: 17 November 2024
-📆 Day: Monday
-
-*Next Reminders Today:*
-- 21:00 - Night Craving
-```
-
-### **Step 3: Check Console Logs**
-In Replit console, you should see:
-```
-🇮🇳 [09:15 PM IST] Active Chat: 123456789
-   ⏰ Next: night_craving in 45 minutes
-```
-
-### **Step 4: Test Reminder**
-Send:
-```
-/test
-```
-You'll immediately get a test reminder with IST timestamp!
-
----
-
-## **🔍 DEBUGGING:**
-
-If reminders still don't fire at 9 PM:
-
-1. **Check your console** - Look for:
-```
-   🇮🇳 [09:00 PM IST] Active Chat: YOUR_CHAT_ID
-```
-
-2. **Send `/status`** - Verify reminders show as "Active"
-
-3. **Send `/time`** - Make sure IST time matches your watch
-
-4. **Look for this in console:**
-```
-   🔔 [09:00 PM IST] TRIGGERING: night_craving
-   ✅ [09:00 PM IST] Sent night_craving reminder
